@@ -46,29 +46,39 @@ object TopicCommand extends Logging {
     if(args.length == 0)
       CommandLineUtils.printUsageAndDie(opts.parser, "Create, delete, describe, or change a topic.")
 
+
     // should have exactly one action
     val actions = Seq(opts.createOpt, opts.listOpt, opts.alterOpt, opts.describeOpt, opts.deleteOpt).count(opts.options.has _)
+    //确保操作只能是--list, --describe, --create, --alter or --delete中的一种
     if(actions != 1)
       CommandLineUtils.printUsageAndDie(opts.parser, "Command must include exactly one action: --list, --describe, --create, --alter or --delete")
 
+    //参数校验
     opts.checkArgs()
 
+    //初始化zk连接
     val zkUtils = ZkUtils(opts.options.valueOf(opts.zkConnectOpt),
                           30000,
                           30000,
                           JaasUtils.isZkSecurityEnabled())
     var exitCode = 0
     try {
-      if(opts.options.has(opts.createOpt))
+      if(opts.options.has(opts.createOpt)) {
+        //创建topic
         createTopic(zkUtils, opts)
-      else if(opts.options.has(opts.alterOpt))
+      } else if(opts.options.has(opts.alterOpt)) {
+        //修改topic
         alterTopic(zkUtils, opts)
-      else if(opts.options.has(opts.listOpt))
+      } else if(opts.options.has(opts.listOpt)) {
+        //获取列表
         listTopics(zkUtils, opts)
-      else if(opts.options.has(opts.describeOpt))
+      } else if(opts.options.has(opts.describeOpt)) {
+        //获取topic描述
         describeTopic(zkUtils, opts)
-      else if(opts.options.has(opts.deleteOpt))
+      } else if(opts.options.has(opts.deleteOpt)) {
+        //删除topic
         deleteTopic(zkUtils, opts)
+      }
     } catch {
       case e: Throwable =>
         println("Error while executing topic command : " + e.getMessage)
@@ -98,15 +108,21 @@ object TopicCommand extends Logging {
     if (Topic.hasCollisionChars(topic))
       println("WARNING: Due to limitations in metric names, topics with a period ('.') or underscore ('_') could collide. To avoid issues it is best to use either, but not both.")
     try {
+      //若指定了--replica-assignment参数，即每个分区的副本列表分配到broker的策略关系
       if (opts.options.has(opts.replicaAssignmentOpt)) {
+        //解析partition副本和brokerId的关系
         val assignment = parseReplicaAssignment(opts.options.valueOf(opts.replicaAssignmentOpt))
+        //更新zk路径上的分区副本和brokerid的关系
         AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkUtils, topic, assignment, configs, update = false)
       } else {
+        //若未指定--replica-assignment参数，则需要校验必要参数：--partitions和--replication-factor
         CommandLineUtils.checkRequiredArgs(opts.parser, opts.options, opts.partitionsOpt, opts.replicationFactorOpt)
         val partitions = opts.options.valueOf(opts.partitionsOpt).intValue
         val replicas = opts.options.valueOf(opts.replicationFactorOpt).intValue
+        //是否开启机架感知，默认开启
         val rackAwareMode = if (opts.options.has(opts.disableRackAware)) RackAwareMode.Disabled
                             else RackAwareMode.Enforced
+        //创建topic
         AdminUtils.createTopic(zkUtils, topic, partitions, replicas, configs, rackAwareMode)
       }
       println("Created topic \"%s\".".format(topic))
@@ -277,19 +293,25 @@ object TopicCommand extends Logging {
   }
 
   def parseReplicaAssignment(replicaAssignmentList: String): Map[Int, List[Int]] = {
+    //如3个分区，2副本，3个broker。则一种分配策略为：1:2,1:3,2:3
     val partitionList = replicaAssignmentList.split(",")
     val ret = new mutable.HashMap[Int, List[Int]]()
+    //遍历每个分区的broker列表
     for (i <- 0 until partitionList.size) {
       val brokerList = partitionList(i).split(":").map(s => s.trim().toInt)
+      //检查是否有重复的broker
       val duplicateBrokers = CoreUtils.duplicates(brokerList)
       if (duplicateBrokers.nonEmpty)
         throw new AdminCommandFailedException("Partition replica lists may not contain duplicate entries: %s".format(duplicateBrokers.mkString(",")))
+      //设置分区号和brokerId列表的关系
       ret.put(i, brokerList.toList)
+      //检查为每个分区指定的brokerId数是不是相同的，即副本因子一致性
       if (ret(i).size != ret(0).size)
         throw new AdminOperationException("Partition " + i + " has different replication factor: " + brokerList)
     }
     ret.toMap
   }
+
 
   class TopicCommandOptions(args: Array[String]) {
     val parser = new OptionParser(false)

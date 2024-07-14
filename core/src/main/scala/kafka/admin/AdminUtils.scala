@@ -130,18 +130,24 @@ object AdminUtils extends Logging with AdminUtilities {
                               replicationFactor: Int,
                               fixedStartIndex: Int = -1,
                               startPartitionId: Int = -1): Map[Int, Seq[Int]] = {
+    //参数校验
     if (nPartitions <= 0)
       throw new InvalidPartitionsException("Number of partitions must be larger than 0.")
     if (replicationFactor <= 0)
       throw new InvalidReplicationFactorException("Replication factor must be larger than 0.")
+    //副本因子不能超过broker数量
     if (replicationFactor > brokerMetadatas.size)
       throw new InvalidReplicationFactorException(s"Replication factor: $replicationFactor larger than available brokers: ${brokerMetadatas.size}.")
-    if (brokerMetadatas.forall(_.rack.isEmpty))
+    //若所有broker均没有指定机架信息
+    if (brokerMetadatas.forall(_.rack.isEmpty)) {
+      //未指定机架时，分区副本分配到broker的策略
       assignReplicasToBrokersRackUnaware(nPartitions, replicationFactor, brokerMetadatas.map(_.id), fixedStartIndex,
         startPartitionId)
-    else {
+    } else {
+      //否则，需要所有broker都指定机架信息
       if (brokerMetadatas.exists(_.rack.isEmpty))
         throw new AdminOperationException("Not all brokers have rack information for replica rack aware assignment.")
+      //指定机架时，分区副本分配到broker的策略
       assignReplicasToBrokersRackAware(nPartitions, replicationFactor, brokerMetadatas, fixedStartIndex,
         startPartitionId)
     }
@@ -458,8 +464,11 @@ object AdminUtils extends Logging with AdminUtilities {
                   replicationFactor: Int,
                   topicConfig: Properties = new Properties,
                   rackAwareMode: RackAwareMode = RackAwareMode.Enforced) {
+    //获取brokerid和机架关系
     val brokerMetadatas = getBrokerMetadatas(zkUtils, rackAwareMode)
+    //生成分区副本和brokerid的分配策略
     val replicaAssignment = AdminUtils.assignReplicasToBrokers(brokerMetadatas, partitions, replicationFactor)
+    //更新zk元数据
     AdminUtils.createOrUpdateTopicPartitionAssignmentPathInZK(zkUtils, topic, replicaAssignment, topicConfig)
   }
 
@@ -510,21 +519,25 @@ object AdminUtils extends Logging with AdminUtilities {
 
     // Configs only matter if a topic is being created. Changing configs via AlterTopic is not supported
     if (!update) {
+      //更新zk节点/config/topics/${topic}的配置信息
       // write out the config if there is any, this isn't transactional with the partition assignments
       writeEntityConfig(zkUtils, getEntityConfigPath(ConfigType.Topic, topic), config)
     }
 
+    //将分区副本和brokerId的关系写入zk路径/brokers/topics/${topic}
     // create the partition assignment
     writeTopicPartitionAssignment(zkUtils, topic, partitionReplicaAssignment, update)
   }
 
   private def writeTopicPartitionAssignment(zkUtils: ZkUtils, topic: String, replicaAssignment: Map[Int, Seq[Int]], update: Boolean) {
     try {
+      //zk路径为/brokers/topics/${topic}
       val zkPath = getTopicPath(topic)
       val jsonPartitionData = zkUtils.replicaAssignmentZkData(replicaAssignment.map(e => e._1.toString -> e._2))
 
       if (!update) {
         info("Topic creation " + jsonPartitionData.toString)
+        //将数据写入zk
         zkUtils.createPersistentPath(zkPath, jsonPartitionData)
       } else {
         info("Topic update " + jsonPartitionData.toString)
