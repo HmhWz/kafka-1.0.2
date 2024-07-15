@@ -73,6 +73,7 @@ class LogManager(logDirs: Seq[File],
   private val logs = new Pool[TopicPartition, Log]()
   private val logsToBeDeleted = new LinkedBlockingQueue[Log]()
 
+  //有效日志目录
   private val _liveLogDirs: ConcurrentLinkedQueue[File] = createAndValidateLogDirs(logDirs, initialOfflineDirs)
 
   def liveLogDirs: Seq[File] = {
@@ -96,6 +97,7 @@ class LogManager(logDirs: Seq[File],
     logDirsSet
   }
 
+  //加载日志目录中的日志文件。这个方法在 LogManager 启动时被调用，以确保所有现存的日志都被加载到内存中，从而可以进行读写操作。
   loadLogs()
 
 
@@ -132,6 +134,7 @@ class LogManager(logDirs: Seq[File],
    * </ol>
    */
   private def createAndValidateLogDirs(dirs: Seq[File], initialOfflineDirs: Seq[File]): ConcurrentLinkedQueue[File] = {
+    //检查重复的日志目录，如果有重复，会抛出异常，因为每个日志目录应该是唯一的。
     if(dirs.map(_.getCanonicalPath).toSet.size < dirs.size)
       throw new KafkaException("Duplicate log directory found: " + dirs.mkString(", "))
 
@@ -139,12 +142,14 @@ class LogManager(logDirs: Seq[File],
 
     for (dir <- dirs if !initialOfflineDirs.contains(dir)) {
       try {
+        //遍历日志目录列表，如果发现某个目录不存在，方法会尝试创建它。如果创建失败，会抛出异常。
         if (!dir.exists) {
           info("Log directory '" + dir.getAbsolutePath + "' not found, creating it.")
           val created = dir.mkdirs()
           if (!created)
             throw new IOException("Failed to create data directory " + dir.getAbsolutePath)
         }
+        //如果目录不可读，同样会抛出异常。
         if (!dir.isDirectory || !dir.canRead)
           throw new IOException(dir.getAbsolutePath + " is not a readable log directory.")
         liveLogDirs.add(dir)
@@ -153,11 +158,12 @@ class LogManager(logDirs: Seq[File],
           error(s"Failed to create or validate data directory $dir.getAbsolutePath", e)
       }
     }
+    //若没有一个有效日志目录，直接退出进程
     if (liveLogDirs.isEmpty) {
       fatal(s"Shutdown broker because none of the specified log dirs from " + dirs.mkString(", ") + " can be created or validated")
       Exit.halt(1)
     }
-
+    //返回一个包含所有有效日志目录的集合。这个集合将被用于 LogManager 的后续操作
     liveLogDirs
   }
 
@@ -213,11 +219,13 @@ class LogManager(logDirs: Seq[File],
 
   private def loadLog(logDir: File, recoveryPoints: Map[TopicPartition, Long], logStartOffsets: Map[TopicPartition, Long]): Unit = {
     debug("Loading log '" + logDir.getName + "'")
+    //从日志目录名称中解析出topic和partition
     val topicPartition = Log.parseTopicPartitionName(logDir)
     val config = topicConfigs.getOrElse(topicPartition.topic, defaultConfig)
     val logRecoveryPoint = recoveryPoints.getOrElse(topicPartition, 0L)
     val logStartOffset = logStartOffsets.getOrElse(topicPartition, 0L)
 
+    //建 Log 对象后，初始化时会加载所有的 segment文件
     val current = Log(
       dir = logDir,
       config = config,
@@ -230,6 +238,7 @@ class LogManager(logDirs: Seq[File],
       brokerTopicStats = brokerTopicStats,
       logDirFailureChannel = logDirFailureChannel)
 
+    //如果日志目录的名称以 -delete 结尾，表示该日志已被标记为删除，将其添加到待删除列表中
     if (logDir.getName.endsWith(Log.DeleteDirSuffix)) {
       this.logsToBeDeleted.add(current)
     } else {
@@ -254,18 +263,22 @@ class LogManager(logDirs: Seq[File],
 
     for (dir <- liveLogDirs) {
       try {
+        //为每个log.dir日志目录创建一个固定大小的线程池，以便并发地加载日志目录。
         val pool = Executors.newFixedThreadPool(ioThreads)
         threadPools.append(pool)
 
+        //检查每个log.dir日志目录下是否存在 .kafka_cleanshutdown 文件，该文件表明 Kafka 上次是正常关闭的，从而跳过恢复过程
         val cleanShutdownFile = new File(dir, Log.CleanShutdownFile)
 
         if (cleanShutdownFile.exists) {
           debug(s"Found clean shutdown file. Skipping recovery for all logs in data directory: ${dir.getAbsolutePath}")
         } else {
+          //否则，说明需要加载日志文件，这里修改broker状态
           // log recovery itself is being performed by `Log` class during initialization
           brokerState.newState(RecoveringFromUncleanShutdown)
         }
 
+        //尝试读取每个日志目录下的 recovery-point-offset-checkpoint 文件，这个文件存储了每个日志分区的恢复点偏移量
         var recoveryPoints = Map[TopicPartition, Long]()
         try {
           recoveryPoints = this.recoveryPointCheckpoints(dir).read
@@ -284,9 +297,11 @@ class LogManager(logDirs: Seq[File],
         }
 
         val jobsForDir = for {
+          //遍历每个日志目录下的所有文件，得到每个以 topic-partition 命名的目录
           dirContent <- Option(dir.listFiles).toList
           logDir <- dirContent if logDir.isDirectory
         } yield {
+          //加载每个分区目录都将创建一个线程
           CoreUtils.runnable {
             try {
               loadLog(logDir, recoveryPoints, logStartOffsets)
@@ -297,6 +312,8 @@ class LogManager(logDirs: Seq[File],
             }
           }
         }
+        //将所有用于分区日志加载的job提交到线程池
+        //注意这里jobs是一个map，key是.kafka_cleanshutdown文件路径，value是一个future列表
         jobs(cleanShutdownFile) = jobsForDir.map(pool.submit)
       } catch {
         case e: IOException =>
@@ -307,8 +324,10 @@ class LogManager(logDirs: Seq[File],
 
     try {
       for ((cleanShutdownFile, dirJobs) <- jobs) {
+        //等待所有线程池中的日志加载任务完成，确保所有日志都已加载
         dirJobs.foreach(_.get)
         try {
+          //删除 .kafka_cleanshutdown 文件，因为它只在启动时检查一次，之后就不再需要
           cleanShutdownFile.delete()
         } catch {
           case e: IOException =>
@@ -324,9 +343,11 @@ class LogManager(logDirs: Seq[File],
         error("There was an error in one of the threads during logs loading: " + e.getCause)
         throw e.getCause
     } finally {
+      //关闭线程池
       threadPools.foreach(_.shutdown())
     }
 
+    //记录加载所花费的时间
     info(s"Logs loading complete in ${time.milliseconds - startMs} ms.")
   }
 
@@ -779,38 +800,58 @@ object LogManager {
             time: Time,
             brokerTopicStats: BrokerTopicStats,
             logDirFailureChannel: LogDirFailureChannel): LogManager = {
+    //将与log相关的配置想拷贝到map，作为默认Log配置
     val defaultProps = KafkaServer.copyKafkaConfigToLog(config)
+    //将与log相关的配置项赋值给LogConfig中的各个参数
     val defaultLogConfig = LogConfig(defaultProps)
 
+    //每个 topic 的日志配置信息的映射，包括日志的保留策略、清理策略等。这些配置信息可以从 ZooKeeper 中获取
     val topicConfigs = AdminUtils.fetchAllTopicConfigs(zkUtils).map { case (topic, configs) =>
       topic -> LogConfig.fromProps(defaultProps, configs)
     }
 
     // read the log configurations from zookeeper
-    val cleanerConfig = CleanerConfig(numThreads = config.logCleanerThreads,
+    val cleanerConfig = CleanerConfig(numThreads = config.logCleanerThreads, //日志清理线程数
+      //去重缓冲区大小，默认4M
       dedupeBufferSize = config.logCleanerDedupeBufferSize,
+      //最大内存可用占比，默认0.9
       dedupeBufferLoadFactor = config.logCleanerDedupeBufferLoadFactor,
+      //I/O 缓冲区大小，默认1M
       ioBufferSize = config.logCleanerIoBufferSize,
+      //日志中消息最大大小，默认32M
       maxMessageSize = config.messageMaxBytes,
+      //清理线程最大读写io速率
       maxIoBytesPerSecond = config.logCleanerIoMaxBytesPerSecond,
+      //没有日志清理时的sleep间隔时间
       backOffMs = config.logCleanerBackoffMs,
+      //是否开启日志清理，默认true
       enableCleaner = config.logCleanerEnable)
 
-    new LogManager(logDirs = config.logDirs.map(new File(_).getAbsoluteFile),
+    new LogManager(logDirs = config.logDirs.map(new File(_).getAbsoluteFile), //日志目录列表
       initialOfflineDirs = initialOfflineDirs.map(new File(_).getAbsoluteFile),
       topicConfigs = topicConfigs,
+      //这是默认的日志配置，当特定 topic 没有特定的配置时使用。它包含了日志的分段大小、刷新间隔等默认设置
       defaultConfig = defaultLogConfig,
+      //这是日志清理器（LogCleaner）的配置，包括清理线程数、去重缓冲区大小、I/O 缓冲区大小等。LogCleaner 负责执行日志压缩，删除过期或无用的日志数据
       cleanerConfig = cleanerConfig,
+      //每个日志目录分配的执行加载任务的线程数目。这些线程负责处理日志的读写操作
       ioThreads = config.numRecoveryThreadsPerDataDir,
+      //这是触发日志刷新到磁盘的检查间隔时间。Kafka 会根据这个时间间隔定期检查需要刷新到磁盘的日志
       flushCheckMs = config.logFlushSchedulerIntervalMs,
+      //这是刷新恢复点检查点的间隔时间。Kafka 会在这个时间间隔内更新每个日志目录下的恢复点检查点文件，该文件记录了每个日志的最大已刷盘偏移量
       flushRecoveryOffsetCheckpointMs = config.logFlushOffsetCheckpointIntervalMs,
       flushStartOffsetCheckpointMs = config.logFlushStartOffsetCheckpointIntervalMs,
+      //这是检查日志保留时间的间隔时间。Kafka 会定期检查日志文件是否超过了保留时间，如果超过则进行清理
       retentionCheckMs = config.logCleanupIntervalMs,
       maxPidExpirationMs = config.transactionIdExpirationMs,
+      //定时任务调度器，用于安排 LogManager 的各种定时任务，如日志清理、刷新等
       scheduler = kafkaScheduler,
+      //当前 broker 的状态，LogManager 会根据 broker 的状态来进行相应的日志管理操作
       brokerState = brokerState,
+      //维护了 broker 中 topic 的统计信息，可能会在日志管理过程中用到
       brokerTopicStats = brokerTopicStats,
       logDirFailureChannel = logDirFailureChannel,
+      //用于提供当前时间的 Time 对象，它可能会被用于日志的清理和刷新操作中
       time = time)
   }
 }

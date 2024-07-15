@@ -134,17 +134,18 @@ case class CompletedTxn(producerId: Long, firstOffset: Long, lastOffset: Long, i
  * @param producerIdExpirationCheckIntervalMs How often to check for producer ids which need to be expired
  */
 @threadsafe
-class Log(@volatile var dir: File,
-          @volatile var config: LogConfig,
-          @volatile var logStartOffset: Long,
-          @volatile var recoveryPoint: Long,
+class Log(@volatile var dir: File, //主题分区副本的目录路径。
+          @volatile var config: LogConfig, //日志配置，包括segment的大小、保留策略等。
+          @volatile var logStartOffset: Long, //日志当前对外可见的最早消息的位移值。
+          @volatile var recoveryPoint: Long, //日志恢复点，用于在Broker重启时恢复日志状态。
           scheduler: Scheduler,
-          brokerTopicStats: BrokerTopicStats,
+          brokerTopicStats: BrokerTopicStats, //用于监控和统计信息。
           time: Time,
           val maxProducerIdExpirationMs: Int,
           val producerIdExpirationCheckIntervalMs: Int,
           val topicPartition: TopicPartition,
-          val producerStateManager: ProducerStateManager,
+          val producerStateManager: ProducerStateManager, //管理生产者相关的元数据。
+         //用于处理日志目录失败的情况。
           logDirFailureChannel: LogDirFailureChannel) extends Logging with KafkaMetricsGroup {
 
   import kafka.log.Log._
@@ -172,6 +173,7 @@ class Log(@volatile var dir: File,
       throw new KafkaStorageException(s"The memory mapped buffer for log of $topicPartition is already closed")
   }
 
+  //封装了下一条待插入消息的位移值，等同于LEO（Log End Offset）。
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* The earliest offset which is part of an incomplete transaction. This is used to compute the
@@ -187,6 +189,7 @@ class Log(@volatile var dir: File,
    */
   @volatile var firstUnstableOffset: Option[LogOffsetMetadata] = None
 
+  //高水位
   /* Keep track of the current high watermark in order to ensure that segments containing offsets at or above it are
    * not eligible for deletion. This means that the active segment is only eligible for deletion if the high watermark
    * equals the log end offset (which may never happen for a partition under consistent load). This is needed to
@@ -194,9 +197,15 @@ class Log(@volatile var dir: File,
    */
   @volatile private var replicaHighWatermark: Option[Long] = None
 
+  /**
+   * 当前 Log 包含的 LogSegment 集合，SkipList 结构：
+   * - 以 baseOffset 作为 key
+   * - 以 LogSegment 对象作为 value
+   */
   /* the actual segments of the log */
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
+  //保存了分区Leader的Epoch值与对应位移值的映射关系。
   val leaderEpochCache: LeaderEpochCache = initializeLeaderEpochCache()
 
   locally {
