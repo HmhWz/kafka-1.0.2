@@ -211,6 +211,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
   locally {
     val startMs = time.milliseconds
 
+    //加载日志目录下的所有日志段文件，并为每个日志段创建LogSegment对象。
     val nextOffset = loadSegments()
 
     /* Calculate the offset of the next message */
@@ -307,6 +308,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
     // segments that come before it
     for (file <- dir.listFiles.sortBy(_.getName) if file.isFile) {
       if (isIndexFile(file)) {
+        //校验每个index文件都存在对应的log文件，如果不存在，则删除此index文件
         // if it is an index file, make sure it has a corresponding .log file
         val offset = offsetFromFile(file)
         val logFile = Log.logFile(dir, offset)
@@ -316,13 +318,18 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
         }
       } else if (isLogFile(file)) {
         // if it's a log file, load the corresponding log segment
+        //获取日志段的起始偏移量，即在文件名中.log前面的部分
         val startOffset = offsetFromFile(file)
+        //索引文件
         val indexFile = Log.offsetIndexFile(dir, startOffset)
+        //时间戳索引文件
         val timeIndexFile = Log.timeIndexFile(dir, startOffset)
+        //事务索引文件
         val txnIndexFile = Log.transactionIndexFile(dir, startOffset)
 
         val indexFileExists = indexFile.exists()
         val timeIndexFileExists = timeIndexFile.exists()
+        // 创建对应的 LogSegment 对象
         val segment = new LogSegment(dir = dir,
           startOffset = startOffset,
           indexIntervalBytes = config.indexInterval,
@@ -331,18 +338,22 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
           time = time,
           fileAlreadyExists = true)
 
+        // 如果对应的 index 文件存在，则校验数据完整性，如果不完整则重建
         if (indexFileExists) {
           try {
+            // 校验 index 文件的完整性
             segment.index.sanityCheck()
             // Resize the time index file to 0 if it is newly created.
             if (!timeIndexFileExists)
               segment.timeIndex.resize(0)
+            //校验 timeindex 文件的完整性
             segment.timeIndex.sanityCheck()
             segment.txnIndex.sanityCheck()
           } catch {
             case e: java.lang.IllegalArgumentException =>
               warn(s"Found a corrupted index file due to ${e.getMessage}}. deleting ${timeIndexFile.getAbsolutePath}, " +
                 s"${indexFile.getAbsolutePath}, and ${txnIndexFile.getAbsolutePath} and rebuilding index...")
+              // 索引文件完整性异常，删除重建索引文件
               Files.deleteIfExists(timeIndexFile.toPath)
               Files.delete(indexFile.toPath)
               segment.txnIndex.delete()
@@ -352,6 +363,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
           error("Could not find offset index file corresponding to log file %s, rebuilding index...".format(segment.log.file.getAbsolutePath))
           recoverSegment(segment)
         }
+        //加载的日志段会被存储在一个 ConcurrentSkipListMap 集合中，这个集合按照日志段的起始偏移量进行排序。
         addSegment(segment)
       }
     }
@@ -411,16 +423,20 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
   private def loadSegments(): Long = {
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
+    //遍历日志目录，移除上次失败操作遗留下来的各种临时文件，例如 .cleaned、.swap、.deleted 文件等。
     val swapFiles = removeTempFilesAndCollectSwapFiles()
 
+    //进行第二次遍历，加载所有日志段的文件。对于每个日志段，Kafka 会尝试创建一个 LogSegment 对象，并将其添加到 segments 集合中
     // now do a second pass and load all the log and index files
     loadSegmentFiles()
 
+    //处理有效的 .swap 文件集合。包括创建对应的 LogSegment 实例，执行恢复操作，并将 .swap 文件重命名为 .log
     // Finally, complete any interrupted swap operations. To be crash-safe,
     // log files that are replaced by the swap segment should be renamed to .deleted
     // before the swap file is restored as the new segment file.
     completeSwapOperations(swapFiles)
 
+    //后处理，如果 SkipListMap 为空，则新建一个空的 activeSegment
     if (logSegments.isEmpty) {
       // no existing segments, create a new mutable segment beginning at offset 0
       addSegment(new LogSegment(dir = dir,
@@ -433,7 +449,8 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
         initFileSize = this.initFileSize,
         preallocate = config.preallocate))
       0
-    } else if (!dir.getAbsolutePath.endsWith(Log.DeleteDirSuffix)) {
+    }//如果不为空
+    else if (!dir.getAbsolutePath.endsWith(Log.DeleteDirSuffix)) {
       val nextOffset = recoverLog()
       // reset the index size of the currently active log segment to allow more entries
       activeSegment.index.resize(config.maxIndexSize)
