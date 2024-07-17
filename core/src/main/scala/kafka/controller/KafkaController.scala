@@ -41,19 +41,69 @@ import scala.collection._
 import scala.util.Try
 
 class ControllerContext(val zkUtils: ZkUtils) {
+
+  /**
+   * Kafka的ControllerContext是Kafka集群中Controller组件的核心数据结构，它负责存储和管理集群的元数据信息。以下是对ControllerContext源码的详细解析：
+   *
+   * ControllerContext简介：
+   * ControllerContext是Kafka集群中Controller组件的核心数据结构，负责存储和管理集群的元数据信息。它包含了集群中所有Broker的信息、主题信息、分区信息、副本信息等。ControllerContext通过与Zookeeper的交互来获取和更新这些元数据信息。
+   *
+   * ControllerContext的主要字段：
+   *
+   * stats：存储Controller的统计信息，如Unclean Leader选举次数等。
+   * offlinePartitionCount：统计集群中所有离线或不可用状态的主题分区数量。
+   * shuttingDownBrokerIds：保存所有正在关闭中的Broker的ID列表。
+   * liveBrokers：当前运行中的Broker对象列表。
+   * liveBrokerEpochs：运行中Broker的Epoch列表。
+   * epoch：Controller当前的Epoch值。
+   * epochZkVersion：Controller对应ZooKeeper节点的Epoch值。
+   * allTopics：集群主题列表。
+   * partitionAssignments：主题分区的副本列表。
+   * partitionLeadershipInfo：主题分区的Leader/ISR副本信息。
+   * partitionsBeingReassigned：正处于副本重分配过程的主题分区列表。
+   * partitionStates：主题分区状态列表。
+   * replicaStates：主题分区的副本状态列表。
+   * replicasOnOfflineDirs：不可用磁盘路径上的副本列表。
+   * topicsToBeDeleted：待删除主题列表。
+   * topicsWithDeletionStarted：已开启删除的主题列表。
+   * topicsIneligibleForDeletion：暂时无法执行删除的主题列表。
+   * ControllerContext的初始化：
+   * ControllerContext在KafkaController启动时初始化。它会从Zookeeper中读取集群的元数据信息，并在Controller的生命周期中维护这些信息。初始化过程中，ControllerContext会读取所有Broker的信息、主题信息、分区信息等，并存储在相应的字段中。
+   *
+   * ControllerContext的更新机制：
+   * ControllerContext通过Zookeeper的Watcher机制来监听集群中的变化。当集群中的Broker上线或下线、主题创建或删除、分区分配或重新分配时，Zookeeper会触发相应的Watcher，ControllerContext会根据这些变化更新其内部的元数据信息。
+   *
+   * ControllerContext的作用：
+   *
+   * 集群元数据管理：ControllerContext负责存储和管理集群的元数据信息，包括Broker信息、主题信息、分区信息、副本信息等。
+   * 协调集群操作：ControllerContext通过与Zookeeper的交互来协调集群中的各种操作，如Broker的上线和下线、主题的创建和删除、分区的分配和重新分配等。
+   * 状态机管理：ControllerContext管理分区状态机和副本状态机，负责处理分区和副本的状态变化。
+   * ControllerContext的监控：
+   * ControllerContext提供了一些监控指标，如activeController，用于实时监控控制器的存活状态。这些监控指标在实际运维操作中非常关键，可以帮助及时发现和处理集群中的问题。
+   *
+   * 通过以上解析，我们可以看到ControllerContext在Kafka集群中扮演着至关重要的角色，它通过管理元数据信息和协调集群操作，确保了Kafka集群的稳定运行和高效管理。
+   */
+  //存储Controller的统计信息，如Unclean Leader选举次数等
   val stats = new ControllerStats
 
+  //控制器通道管理器，负责管理与 Broker 的通信。
   var controllerChannelManager: ControllerChannelManager = null
-
+  //保存所有正在关闭中的Broker的ID列表
   var shuttingDownBrokerIds: mutable.Set[Int] = mutable.Set.empty
+  //控制器纪元（epoch），用于标识控制器的状态版本。
   var epoch: Int = KafkaController.InitialControllerEpoch - 1
+  //ZooKeeper 中控制器纪元的版本号。
   var epochZkVersion: Int = KafkaController.InitialControllerEpochZkVersion - 1
+  //存储集群中所有主题的集合。
   var allTopics: Set[String] = Set.empty
+  //集群的分区副本分配关系
   var partitionReplicaAssignment: mutable.Map[TopicAndPartition, Seq[Int]] = mutable.Map.empty
+  //存储分区的leader副本和isr列表信息
   var partitionLeadershipInfo: mutable.Map[TopicAndPartition, LeaderIsrAndControllerEpoch] = mutable.Map.empty
   val partitionsBeingReassigned: mutable.Map[TopicAndPartition, ReassignedPartitionsContext] = new mutable.HashMap
   val replicasOnOfflineDirs: mutable.Map[Int, Set[TopicAndPartition]] = mutable.HashMap.empty
 
+  //所有潜在的broker，包含运行中和关闭中的
   private var liveBrokersUnderlying: Set[Broker] = Set.empty
   private var liveBrokerIdsUnderlying: Set[Int] = Set.empty
 
@@ -64,6 +114,7 @@ class ControllerContext(val zkUtils: ZkUtils) {
   }
 
   // getter
+  //当前运行中的Broker对象列表
   def liveBrokers = liveBrokersUnderlying.filter(broker => !shuttingDownBrokerIds.contains(broker.id))
   def liveBrokerIds = liveBrokerIdsUnderlying -- shuttingDownBrokerIds
 
@@ -186,6 +237,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
   private val logDirEventNotificationListener = new LogDirEventNotificationListener(this, eventManager)
 
   @volatile private var activeControllerId = -1
+  //统计集群中所有离线或不可用状态的主题分区数量
   @volatile private var offlinePartitionCount = 0
   @volatile private var preferredReplicaImbalanceCount = 0
   @volatile private var globalTopicCount = 0
@@ -316,6 +368,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
       delay = delay, unit = unit)
   }
 
+  //onControllerResignation 方法的主要作用是清理控制器相关的资源和状态，确保在控制器角色变更时能够平滑过渡。
   /**
    * This callback is invoked by the zookeeper leader elector when the current broker resigns as the controller. This is
    * required to clean up internal controller data structures
@@ -323,14 +376,21 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
   def onControllerResignation() {
     debug("Resigning")
     // de-register listeners
+    //取消注册的各种监听器。
+    //取消 ISR 列表变更监听器的注册。
     deregisterIsrChangeNotificationListener()
+    //取消分区重分配监听器的注册。
     deregisterPartitionReassignmentListener()
+    //取消优先副本选举监听器的注册
     deregisterPreferredReplicaElectionListener()
+    //取消日志目录变更监听器的注册
     deregisterLogDirEventNotificationListener()
 
+    //关闭主题删除管理器。
     // reset topic deletion manager
     topicDeletionManager.reset()
 
+    //关闭分区leader负载均衡定时器
     // shutdown leader rebalance scheduler
     kafkaScheduler.shutdown()
     offlinePartitionCount = 0
@@ -340,6 +400,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
 
     // de-register partition ISR listener for on-going partition reassignment task
     deregisterPartitionReassignmentIsrChangeListeners()
+    //关闭状态机
     // shutdown partition state machine
     partitionStateMachine.shutdown()
     deregisterTopicChangeListener()
@@ -349,6 +410,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
     replicaStateMachine.shutdown()
     deregisterBrokerChangeListener()
 
+    //重置控制器上下文
     resetControllerContext()
 
     info("Resigned")
@@ -643,7 +705,9 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
    * elector
    */
   def startup() = {
+    //将Startup事件放入事件队列
     eventManager.put(Startup)
+    //启动事件队列处理线程，会处理Startup事件
     eventManager.start()
   }
 
@@ -1576,37 +1640,50 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
     def state = ControllerState.ControllerChange
 
     override def process(): Unit = {
+      //注册一个监听器，当 ZooKeeper 会话超时时，会触发相应的回调。
       registerSessionExpirationListener()
+      //注册控制器变更监听器，以便在控制器角色发生变化时（例如，当前控制器失败，需要选举新的控制器）能够及时响应。
       registerControllerChangeListener()
+      //尝试选举为集群的控制器
       elect()
     }
 
   }
 
+  //zk的/controller节点数据变更事件
   case class ControllerChange(newControllerId: Int) extends ControllerEvent {
 
     def state = ControllerState.ControllerChange
 
     override def process(): Unit = {
+      //若这个broker之前为控制器，wasActiveBeforeChange为true
       val wasActiveBeforeChange = isActive
       activeControllerId = newControllerId
+      //若当前broker之前是控制前，当前已经不是了
       if (wasActiveBeforeChange && !isActive) {
+        //调用控制器的"辞职"（即关闭）方法
         onControllerResignation()
       }
     }
 
   }
 
+  //控制器重新选举事件
   case object Reelect extends ControllerEvent {
 
     def state = ControllerState.ControllerChange
 
     override def process(): Unit = {
+      //先前broker是否为控制器
       val wasActiveBeforeChange = isActive
+      //更新contrllerId为zk中/controller节点的数据
       activeControllerId = getControllerID()
+      //若该broker之前是控制器，而此次更新后不再是了
       if (wasActiveBeforeChange && !isActive) {
+        //调用控制器“辞职”（关闭）方法
         onControllerResignation()
       }
+      //再次尝试竞选控制器
       elect()
     }
 
@@ -1659,25 +1736,31 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, time: Time, met
     val timestamp = time.milliseconds
     val electString = ZkUtils.controllerZkData(config.brokerId, timestamp)
 
+    //获取zk的/controller节点数据，并解析出控制器的brokerId
     activeControllerId = getControllerID()
     /*
      * We can get here during the initial startup and the handleDeleted ZK callback. Because of the potential race condition,
      * it's possible that the controller has already been elected when we get here. This check will prevent the following
      * createEphemeralPath method from getting into an infinite loop if this broker is already the controller.
      */
+    //说明集群已存在controler，直接返回
     if (activeControllerId != -1) {
       debug("Broker %d has been elected as the controller, so stopping the election process.".format(activeControllerId))
       return
     }
 
+    //否则抢占式方式尝试在zk中创建/controller的临时节点
     try {
       val zkCheckedEphemeral = new ZKCheckedEphemeral(ZkUtils.ControllerPath,
                                                       electString,
                                                       controllerContext.zkUtils.zkConnection.getZookeeper,
                                                       controllerContext.zkUtils.isSecure)
       zkCheckedEphemeral.create()
+      //未抛出异常，竞选成功
       info(config.brokerId + " successfully elected as the controller")
+      //设置为当前的broker.id
       activeControllerId = config.brokerId
+      //控制器初始化方法
       onControllerFailover()
     } catch {
       case _: ZkNodeExistsException =>
@@ -1800,10 +1883,12 @@ class PreferredReplicaElectionListener(controller: KafkaController, eventManager
 }
 
 class ControllerChangeListener(controller: KafkaController, eventManager: ControllerEventManager) extends IZkDataListener {
+  //zk的/controller节点数据变更
   override def handleDataChange(dataPath: String, data: Any): Unit = {
     eventManager.put(controller.ControllerChange(KafkaController.parseControllerId(data.toString)))
   }
 
+  //zk的/controler节点被删除，则触发重新选举
   override def handleDataDeleted(dataPath: String): Unit = {
     eventManager.put(controller.Reelect)
   }

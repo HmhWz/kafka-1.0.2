@@ -436,7 +436,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
     // before the swap file is restored as the new segment file.
     completeSwapOperations(swapFiles)
 
-    //后处理，如果 SkipListMap 为空，则新建一个空的 activeSegment
+    //如果 SkipListMap 为空，则新建一个空的 activeSegment
     if (logSegments.isEmpty) {
       // no existing segments, create a new mutable segment beginning at offset 0
       addSegment(new LogSegment(dir = dir,

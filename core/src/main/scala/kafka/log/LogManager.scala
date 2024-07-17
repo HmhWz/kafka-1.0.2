@@ -358,33 +358,39 @@ class LogManager(logDirs: Seq[File],
     /* Schedule the cleanup task to delete old logs */
     if (scheduler != null) {
       info("Starting log cleanup with a period of %d ms.".format(retentionCheckMs))
+      //定时删除过期数据
       scheduler.schedule("kafka-log-retention",
                          cleanupLogs _,
                          delay = InitialTaskDelayMs,
                          period = retentionCheckMs,
                          TimeUnit.MILLISECONDS)
       info("Starting log flusher with a default period of %d ms.".format(flushCheckMs))
+      //定时刷新数据到磁盘
       scheduler.schedule("kafka-log-flusher",
                          flushDirtyLogs _,
                          delay = InitialTaskDelayMs,
                          period = flushCheckMs,
                          TimeUnit.MILLISECONDS)
+      //定时将所有数据目录所有日志的检查点写到检查点文件中
       scheduler.schedule("kafka-recovery-point-checkpoint",
                          checkpointLogRecoveryOffsets _,
                          delay = InitialTaskDelayMs,
                          period = flushRecoveryOffsetCheckpointMs,
                          TimeUnit.MILLISECONDS)
+      //定时将所有日志的当前日志开始偏移量写到日志目录中的一个文本文件中
       scheduler.schedule("kafka-log-start-offset-checkpoint",
                          checkpointLogStartOffsets _,
                          delay = InitialTaskDelayMs,
                          period = flushStartOffsetCheckpointMs,
                          TimeUnit.MILLISECONDS)
+      //定时删除标记为 delete 的日志文件
       scheduler.schedule("kafka-delete-logs",
                          deleteLogs _,
                          delay = InitialTaskDelayMs,
                          period = defaultConfig.fileDeleteDelayMs,
                          TimeUnit.MILLISECONDS)
     }
+    //启动LogCleaner
     if (cleanerConfig.enableCleaner)
       cleaner.startup()
   }
