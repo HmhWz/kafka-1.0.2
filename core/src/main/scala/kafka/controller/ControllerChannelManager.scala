@@ -46,6 +46,23 @@ object ControllerChannelManager {
   val QueueSizeMetricName = "QueueSize"
 }
 
+//在 Kafka 中，ControllerChannelManager 是一个关键组件，负责管理控制器与其它 Kafka 代理（Broker）之间的通信。控制器（Controller）是 Kafka 集群中的一个特殊角色，负责管理集群的元数据和协调集群的操作，如分区分配、副本同步等。
+//
+//ControllerChannelManager 的主要功能包括：
+//
+//管理通信通道：维护控制器与各个 Broker 之间的网络连接和通信通道。
+//发送控制命令：向 Broker 发送控制命令，如分区重分配、副本同步等。
+//接收响应：接收 Broker 发送的响应和状态更新。
+//处理失败和重试：处理与 Broker 通信过程中可能出现的失败，并进行重试。
+//监控和统计：监控通信状态和性能，收集统计信息。
+
+//ControllerChannelManager 在初始化时，会为集群中的每个节点初始化一个 ControllerBrokerStateInfo 对象，该对象包含四个部分：
+//
+//NetworkClient：网络连接对象；
+//Node：节点信息；
+//BlockingQueue：请求队列；
+//RequestSendThread：请求的发送线程。
+//其具体实现如下所示：
 class ControllerChannelManager(controllerContext: ControllerContext, config: KafkaConfig, time: Time, metrics: Metrics,
                                stateChangeLogger: StateChangeLogger, threadNamePrefix: Option[String] = None) extends Logging with KafkaMetricsGroup {
   import ControllerChannelManager._
@@ -76,6 +93,7 @@ class ControllerChannelManager(controllerContext: ControllerContext, config: Kaf
     }
   }
 
+  //向 broker 发送请求（并没有真正发送,只是添加到对应的 queue 中）, 请求的的发送是在 每台 Broker 对应的 RequestSendThread 中处理的。
   def sendRequest(brokerId: Int, apiKey: ApiKeys, request: AbstractRequest.Builder[_ <: AbstractRequest],
                   callback: AbstractResponse => Unit = null) {
     brokerLock synchronized {
