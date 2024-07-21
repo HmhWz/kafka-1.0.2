@@ -483,6 +483,7 @@ class KafkaApis(val requestChannel: RequestChannel,
   /**
    * Handle a fetch request
    */
+    //处理消费者消息消费请求、follwer副本同步请求
   def handleFetchRequest(request: RequestChannel.Request) {
     val fetchRequest = request.body[FetchRequest]
     val versionId = request.header.apiVersion
@@ -492,6 +493,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     val nonExistingTopicResponseData = mutable.ArrayBuffer[(TopicPartition, FetchResponse.PartitionData)]()
     val authorizedRequestInfo = mutable.ArrayBuffer[(TopicPartition, FetchRequest.PartitionData)]()
 
+    //replicaId >= 0时表示是follwer副本同步请求
     if (fetchRequest.isFromFollower() && !authorize(request.session, ClusterAction, Resource.ClusterResource))    
       for (topicPartition <- fetchRequest.fetchData.asScala.keys)
         unauthorizedTopicResponseData += topicPartition -> new FetchResponse.PartitionData(Errors.CLUSTER_AUTHORIZATION_FAILED,
@@ -608,16 +610,17 @@ class KafkaApis(val requestChannel: RequestChannel,
       processResponseCallback(Seq.empty)
     else {
       // call the replica manager to fetch messages from the local replica
+      //调用replica manager从本地日志副本中拉取消息
       replicaManager.fetchMessages(
-        fetchRequest.maxWait.toLong,
-        fetchRequest.replicaId,
-        fetchRequest.minBytes,
-        fetchRequest.maxBytes,
+        fetchRequest.maxWait.toLong, //最长等待时间
+        fetchRequest.replicaId, //follower副本的brokerid
+        fetchRequest.minBytes, //拉取请求设置的最小拉取字节
+        fetchRequest.maxBytes, //拉取请求设置的最大拉取字节
         versionId <= 2,
         authorizedRequestInfo,
         replicationQuota(fetchRequest),
-        processResponseCallback,
-        fetchRequest.isolationLevel)
+        processResponseCallback, //回调函数
+        fetchRequest.isolationLevel) //隔离级别，包含 READ_UNCOMMITTED, READ_COMMITTED;
     }
   }
 

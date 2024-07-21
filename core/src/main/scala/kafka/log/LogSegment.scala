@@ -171,6 +171,8 @@ class LogSegment(val log: FileRecords,
    * @return The position in the log storing the message with the least offset >= the requested offset and the size of the
     *        message or null if no message meets this criteria.
    */
+    //查找 offset 索引文件：调用 offset 索引文件的 lookup() 查找方法，获取离 startOffset 最接近的物理位置；
+    //调用数据文件的 searchFor() 方法，从指定的物理位置开始读取每条数据，知道找到对应 offset 的物理位置。
   @threadsafe
   private[log] def translateOffset(offset: Long, startingFilePosition: Int = 0): LogOffsetPosition = {
     val mapping = index.lookup(offset)
@@ -196,10 +198,13 @@ class LogSegment(val log: FileRecords,
     if (maxSize < 0)
       throw new IllegalArgumentException("Invalid max size for log read (%d)".format(maxSize))
 
+    //log文件大小
     val logSize = log.sizeInBytes // this may change, need to save a consistent copy
+    //将起始的 offset 转换为起始的实际物理位置
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
+    //如果起始位置已经超出了日志的末尾，则返回null
     if (startOffsetAndSize == null)
       return null
 
@@ -215,10 +220,13 @@ class LogSegment(val log: FileRecords,
       return FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY)
 
     // calculate the length of the message set to read based on whether or not they gave us a maxOffset
+    //计算要读取的消息长度
     val fetchSize: Int = maxOffset match {
+      //maxOffset=None，表示follower副本同步时的计算方式
       case None =>
         // no max offset, just read until the max position
         min((maxPosition - startPosition).toInt, adjustedMaxSize)
+      //consumer拉取消息的计算方式
       case Some(offset) =>
         // there is a max offset, translate it to a file position and use that to calculate the max read size;
         // when the leader of a partition changes, it's possible for the new leader's high watermark to be less than the
@@ -235,6 +243,7 @@ class LogSegment(val log: FileRecords,
         min(min(maxPosition, endPosition) - startPosition, adjustedMaxSize).toInt
     }
 
+    //根据起始的物理位置和读取长度读取数据文件
     FetchDataInfo(offsetMetadata, log.read(startPosition, fetchSize),
       firstEntryIncomplete = adjustedMaxSize < startOffsetAndSize.size)
   }

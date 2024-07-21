@@ -83,6 +83,8 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    *         If the target offset is smaller than the least entry in the index (or the index is empty),
    *         the pair (baseOffset, 0) is returned.
    */
+    //offset 索引文件是使用内存映射mmap（不了解的，可以阅读 操作系统之共享对象学习）的方式加载到内存中的，在查询的过程中，内存映射是会发生变化，
+    // 所以在 lookup() 中先拷贝出来了一个（idx），然后再进行查询，具体实现如下：
   def lookup(targetOffset: Long): OffsetPosition = {
     maybeLock(lock) {
       val idx = mmap.duplicate

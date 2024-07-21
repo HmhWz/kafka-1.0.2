@@ -1017,6 +1017,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
    * @throws OffsetOutOfRangeException If startOffset is beyond the log end offset or before the log start offset
    * @return The fetch data information including fetch starting offset metadata and messages read.
    */
+    //从指定 startOffset 开始读取数据
   def read(startOffset: Long, maxLength: Int, maxOffset: Option[Long] = None, minOneMessage: Boolean = false,
            isolationLevel: IsolationLevel): FetchDataInfo = {
     maybeHandleIOException(s"Exception while reading from $topicPartition in dir ${dir.getParent}") {
@@ -1034,6 +1035,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
           abortedTransactions = abortedTransactions)
       }
 
+      // 从跳跃表中查找对应的日志分段（logSegment）
       var segmentEntry = segments.floorEntry(startOffset)
 
       // return error on attempt to read beyond the log end offset or read below log start offset
@@ -1054,6 +1056,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
           if (segmentEntry == segments.lastEntry) {
             val exposedPos = nextOffsetMetadata.relativePositionInSegment.toLong
             // Check the segment again in case a new segment has just rolled out.
+            //刚好此时产生了新的 segment文件, 再次判断
             if (segmentEntry != segments.lastEntry)
             // New log segment has rolled out, we can read up to the file end.
               segment.size
@@ -1063,8 +1066,10 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
             segment.size
           }
         }
+        //从 LogSegment 中读取相应的数据
         val fetchInfo = segment.read(startOffset, maxOffset, maxLength, maxPosition, minOneMessage)
         if (fetchInfo == null) {
+          //如果该日志分段没有读取到数据, 则读取更高的日志分段
           segmentEntry = segments.higherEntry(segmentEntry.getKey)
         } else {
           return isolationLevel match {

@@ -411,16 +411,22 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
+  //获取该分区对应的leader Replica对象
   def getLeaderReplicaIfLocal(topicPartition: TopicPartition): Replica =  {
+    //先获取对应的partition对象
     val partitionOpt = getPartition(topicPartition)
     partitionOpt match {
+      //本节点没找到该partition，抛出异常
       case None =>
         throw new UnknownTopicOrPartitionException(s"Partition $topicPartition doesn't exist on $localBrokerId")
       case Some(partition) =>
+        //为OfflinePartition，抛出异常
         if (partition eq ReplicaManager.OfflinePartition)
           throw new KafkaStorageException(s"Partition $topicPartition is in an offline log directory on broker $localBrokerId")
         else partition.leaderReplicaIfLocal match {
+          //本broker找到了该分区leader副本，直接返回该Replica对象
           case Some(leaderReplica) => leaderReplica
+          //本broker没有该分区leader副本，抛出异常
           case None =>
             throw new NotLeaderForPartitionException(s"Leader not local for partition $topicPartition on broker $localBrokerId")
         }
@@ -787,6 +793,7 @@ class ReplicaManager(val config: KafkaConfig,
    * Fetch messages from the leader replica, and wait until enough data can be fetched and return;
    * the callback function will be triggered either when timeout or required fetch info is satisfied
    */
+    //从leader副本拉取数据，等待直到拉取到足够的数据，在超时或拉取数据满足条件时会触发回调函数
   def fetchMessages(timeout: Long,
                     replicaId: Int,
                     fetchMinBytes: Int,
@@ -796,11 +803,15 @@ class ReplicaManager(val config: KafkaConfig,
                     quota: ReplicaQuota = UnboundedQuota,
                     responseCallback: Seq[(TopicPartition, FetchPartitionData)] => Unit,
                     isolationLevel: IsolationLevel) {
+      //replicaId>=0时，表示是对应brokerId的follower副本的拉取请求。否则就是consumer的拉取请求
     val isFromFollower = Request.isValidBrokerId(replicaId)
+      //目前只能从leader拉取消息，因此fetchOnlyFromLeader始终为true
     val fetchOnlyFromLeader = replicaId != Request.DebuggingConsumerId
+      //fetchOnlyCommitted=true表示拉取请求来自 consumer, 只能拉取 HW 以内的数据；如果请求是来自 Follower Replica 同步,则没有该限制（false）。
     val fetchOnlyCommitted = !isFromFollower
 
     def readFromLog(): Seq[(TopicPartition, LogReadResult)] = {
+      //获取本地日志
       val result = readFromLocalLog(
         replicaId = replicaId,
         fetchOnlyFromLeader = fetchOnlyFromLeader,
@@ -810,6 +821,7 @@ class ReplicaManager(val config: KafkaConfig,
         readPartitionInfo = fetchInfos,
         quota = quota,
         isolationLevel = isolationLevel)
+      //如果请求来自follower副本，则需要更新follower相关的拉取状态
       if (isFromFollower) updateFollowerLogReadResults(replicaId, result)
       else result
     }
@@ -826,6 +838,7 @@ class ReplicaManager(val config: KafkaConfig,
     //                        2) fetch request does not require any data
     //                        3) has enough data to respond
     //                        4) some error happens while reading data
+      //若满足一下条件之一将会直接返回结果：timeout<=0、拉取的消息为空、拉取到了足够的数据、读取数据期间发生异常
     if (timeout <= 0 || fetchInfos.isEmpty || bytesReadable >= fetchMinBytes || errorReadingData) {
       val fetchPartitionData = logReadResults.map { case (tp, result) =>
         tp -> FetchPartitionData(result.error, result.highWatermark, result.leaderLogStartOffset, result.info.records,
@@ -833,6 +846,7 @@ class ReplicaManager(val config: KafkaConfig,
       }
       responseCallback(fetchPartitionData)
     } else {
+      //未满足立即返回结果的情况，需延迟返回结果
       // construct the fetch results from the read results
       val fetchPartitionStatus = logReadResults.map { case (topicPartition, result) =>
         val fetchInfo = fetchInfos.collectFirst {
@@ -857,6 +871,7 @@ class ReplicaManager(val config: KafkaConfig,
   /**
    * Read from multiple topic partitions at the given offset up to maxSize bytes
    */
+    //从多个partition给定的offset中获取消息
   def readFromLocalLog(replicaId: Int,
                        fetchOnlyFromLeader: Boolean,
                        readOnlyCommitted: Boolean,
@@ -880,11 +895,14 @@ class ReplicaManager(val config: KafkaConfig,
           (if (minOneMessage) s", ignoring response/partition size limits" else ""))
 
         // decide whether to only fetch from leader
-        val localReplica = if (fetchOnlyFromLeader)
+        //当前fetchOnlyFromLeader始终为true
+        val localReplica = if (fetchOnlyFromLeader) {
+          //获取该分区对应的leader Replica对象
           getLeaderReplicaIfLocal(tp)
-        else
+        } else
           getReplicaOrException(tp)
 
+        //获取 hw 位置，副本同步不设置这个值
         val initialHighWatermark = localReplica.highWatermark.messageOffset
         val lastStableOffset = if (isolationLevel == IsolationLevel.READ_COMMITTED)
           Some(localReplica.lastStableOffset.messageOffset)
@@ -892,6 +910,7 @@ class ReplicaManager(val config: KafkaConfig,
           None
 
         // decide whether to only fetch committed data (i.e. messages below high watermark)
+        //readOnlyCommitted=true，表示是consumer只能消费到hw前的消息，为false表示是follower同步消息，没有这个限制
         val maxOffsetOpt = if (readOnlyCommitted)
           Some(lastStableOffset.getOrElse(initialHighWatermark))
         else
@@ -903,7 +922,9 @@ class ReplicaManager(val config: KafkaConfig,
          * where data gets appended to the log immediately after the replica has consumed from it
          * This can cause a replica to always be out of sync.
          */
+        //Log end offset
         val initialLogEndOffset = localReplica.logEndOffset.messageOffset
+        //log Start Offset
         val initialLogStartOffset = localReplica.logStartOffset
         val fetchTimeMs = time.milliseconds
         val logReadInfo = localReplica.log match {
@@ -911,9 +932,11 @@ class ReplicaManager(val config: KafkaConfig,
             val adjustedFetchSize = math.min(partitionFetchSize, limitBytes)
 
             // Try the read first, this tells us whether we need all of adjustedFetchSize for this partition
+            //从指定的 offset 位置开始读取数据，如果是follower副本同步，则maxOffsetOpt=None
             val fetch = log.read(offset, adjustedFetchSize, maxOffsetOpt, minOneMessage, isolationLevel)
 
             // If the partition is being throttled, simply return an empty set.
+            //如果partition被限速了,那么返回 空 集合
             if (shouldLeaderThrottle(quota, tp, replicaId))
               FetchDataInfo(fetch.fetchOffsetMetadata, MemoryRecords.EMPTY)
             // For FetchRequest version 3, we replace incomplete message sets with an empty one as consumers can make
@@ -970,8 +993,10 @@ class ReplicaManager(val config: KafkaConfig,
     }
 
     var limitBytes = fetchMaxBytes
+      //存储拉取的数据结果集
     val result = new mutable.ArrayBuffer[(TopicPartition, LogReadResult)]
     var minOneMessage = !hardMaxBytesLimit
+      //遍历要拉取的partition，并调用read方法读取数据
     readPartitionInfo.foreach { case (tp, fetchInfo) =>
       val readResult = read(tp, fetchInfo, limitBytes, minOneMessage)
       val recordBatchSize = readResult.info.records.sizeInBytes
