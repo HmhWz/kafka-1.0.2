@@ -180,12 +180,14 @@ class MetadataCache(brokerId: Int) extends Logging {
   def getControllerId: Option[Int] = controllerId
 
   // This method returns the deleted TopicPartitions received from UpdateMetadataRequest
+  //更新本地的元数据信息,并返回要删除的 topic-partition
   def updateCache(correlationId: Int, updateMetadataRequest: UpdateMetadataRequest): Seq[TopicPartition] = {
     inWriteLock(partitionMetadataLock) {
       controllerId = updateMetadataRequest.controllerId match {
           case id if id < 0 => None
           case id => Some(id)
         }
+      //清空 aliveNodes 和 aliveBrokers 记录,并更新成最新的记录
       aliveNodes.clear()
       aliveBrokers.clear()
       updateMetadataRequest.liveBrokers.asScala.foreach { broker =>
@@ -206,12 +208,15 @@ class MetadataCache(brokerId: Int) extends Logging {
       updateMetadataRequest.partitionStates.asScala.foreach { case (tp, info) =>
         val controllerId = updateMetadataRequest.controllerId
         val controllerEpoch = updateMetadataRequest.controllerEpoch
+        // 对于要删除的 topic-partition，从缓存中删除，并记录下来作为这个方法的返回；
         if (info.basePartitionState.leader == LeaderAndIsr.LeaderDuringDelete) {
+          //从 cache 中删除
           removePartitionInfo(tp.topic, tp.partition)
           stateChangeLogger.trace(s"Deleted partition $tp from metadata cache in response to UpdateMetadata " +
             s"request sent by controller $controllerId epoch $controllerEpoch with correlation id $correlationId")
           deletedPartitions += tp
         } else {
+          // 对于其他的 topic-partition，执行 updateOrCreate 操作。
           addOrUpdatePartitionInfo(tp.topic, tp.partition, info)
           stateChangeLogger.trace(s"Cached leader info $info for partition $tp in response to " +
             s"UpdateMetadata request sent by controller $controllerId epoch $controllerEpoch with correlation id $correlationId")
