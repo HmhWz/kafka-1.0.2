@@ -131,6 +131,10 @@ object ReplicaManager {
   val OfflinePartition = new Partition("", -1, null, null, isOffline = true)
 }
 
+//副本管理器，主要负责管理这台broker的所有分区副本的读写操作以及副本相关的管理任务。
+//每个副本（replica）都会跟日志实例（Log 对象）一一对应，一个副本会对应一个 Log 对象。
+//ReplicaManager 的并不负责具体的日志创建，它只是管理 Broker 上的所有分区（也就是图中下一步的那个 Partition 对象）。
+//在创建 Partition 对象时，它需要 ReplicaManager 的 logManager 对象，Partition 会通过这个 logManager 对象为每个 replica 创建对应的日志。
 class ReplicaManager(val config: KafkaConfig,
                      metrics: Metrics,
                      time: Time,
@@ -440,6 +444,7 @@ class ReplicaManager(val config: KafkaConfig,
    * the callback function will be triggered either when timeout or the required acks are satisfied;
    * if the callback function itself is already synchronized on some object then pass this object to avoid deadlock.
    */
+    //向分区的leader副本写入日志，并等待同步到其他副本。如果满足了acks参数或超时了，会触发回调函数调用。
   def appendRecords(timeout: Long,
                     requiredAcks: Short,
                     internalTopicsAllowed: Boolean,
@@ -448,8 +453,10 @@ class ReplicaManager(val config: KafkaConfig,
                     responseCallback: Map[TopicPartition, PartitionResponse] => Unit,
                     delayedProduceLock: Option[Lock] = None,
                     processingStatsCallback: Map[TopicPartition, RecordsProcessingStats] => Unit = _ => ()) {
+      //校验acks参数，只能为其中一种：-1，1，0
     if (isValidRequiredAcks(requiredAcks)) {
       val sTime = time.milliseconds
+      //向本地的副本 log 追加数据
       val localProduceResults = appendToLocalLog(internalTopicsAllowed = internalTopicsAllowed,
         isFromClient = isFromClient, entriesPerPartition, requiredAcks)
       debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
@@ -463,9 +470,11 @@ class ReplicaManager(val config: KafkaConfig,
 
       processingStatsCallback(localProduceResults.mapValues(_.info.recordsProcessingStats))
 
+      ////处理 acks=-1 的情况,需要等到 isr 的所有follower副本都写入成功的话,才能返回最后结果
       if (delayedProduceRequestRequired(requiredAcks, entriesPerPartition, localProduceResults)) {
         // create delayed produce operation
         val produceMetadata = ProduceMetadata(requiredAcks, produceStatus)
+        //延迟 produce 请求
         val delayedProduce = new DelayedProduce(timeout, produceMetadata, this, responseCallback, delayedProduceLock)
 
         // create a list of (topic, partition) pairs to use as keys for this delayed produce operation
@@ -477,6 +486,7 @@ class ReplicaManager(val config: KafkaConfig,
         delayedProducePurgatory.tryCompleteElseWatch(delayedProduce, producerRequestKeys)
 
       } else {
+        //若不是acks=-1的情况，可以通过回调函数直接返回结果
         // we can respond immediately
         val produceResponseStatus = produceStatus.mapValues(status => status.responseStatus)
         responseCallback(produceResponseStatus)
@@ -695,29 +705,37 @@ class ReplicaManager(val config: KafkaConfig,
   /**
    * Append the messages to the local replica logs
    */
+    //向本地的 日志副本 写入数据
   private def appendToLocalLog(internalTopicsAllowed: Boolean,
                                isFromClient: Boolean,
                                entriesPerPartition: Map[TopicPartition, MemoryRecords],
                                requiredAcks: Short): Map[TopicPartition, LogAppendResult] = {
     trace(s"Append [$entriesPerPartition] to local log")
+      //遍历要写的所有 topic-partition
     entriesPerPartition.map { case (topicPartition, records) =>
       brokerTopicStats.topicStats(topicPartition.topic).totalProduceRequestRate.mark()
       brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
 
       // reject appending to internal topics if it is not allowed
+      //只有当clientId==__admin_client时（管理员命令，对应internalTopicsAllowed=true），才能向 kafka 的内部 topic 追加数据
       if (Topic.isInternal(topicPartition.topic) && !internalTopicsAllowed) {
         (topicPartition, LogAppendResult(
           LogAppendInfo.UnknownLogAppendInfo,
           Some(new InvalidTopicException(s"Cannot append to internal topic ${topicPartition.topic}"))))
       } else {
         try {
+          //查找对应的 Partition
           val partitionOpt = getPartition(topicPartition)
           val info = partitionOpt match {
             case Some(partition) =>
-              if (partition eq ReplicaManager.OfflinePartition)
+              //partition为OfflinePartition，返回异常
+              if (partition eq ReplicaManager.OfflinePartition) {
                 throw new KafkaStorageException(s"Partition $topicPartition is in an offline log directory on broker $localBrokerId")
+              }
+              //向分区对应的leader副本写入数据
               partition.appendRecordsToLeader(records, isFromClient, requiredAcks)
 
+            //在当前broker没找到这个分区，返回异常
             case None => throw new UnknownTopicOrPartitionException("Partition %s doesn't exist on %d"
               .format(topicPartition, localBrokerId))
           }
@@ -729,6 +747,7 @@ class ReplicaManager(val config: KafkaConfig,
               info.lastOffset - info.firstOffset + 1
 
           // update stats for successfully appended bytes and messages as bytesInRate and messageInRate
+          //更新 metrics
           brokerTopicStats.topicStats(topicPartition.topic).bytesInRate.mark(records.sizeInBytes)
           brokerTopicStats.allTopicsStats.bytesInRate.mark(records.sizeInBytes)
           brokerTopicStats.topicStats(topicPartition.topic).messagesInRate.mark(numAppendedMessages)

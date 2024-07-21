@@ -174,6 +174,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
   }
 
   //封装了下一条待插入消息的位移值，等同于LEO（Log End Offset）。
+  //包括 activeSegment 的下一条消息的偏移量、该 activeSegment 的基准偏移量及日志分段的大小；
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* The earliest offset which is part of an incomplete transaction. This is used to compute the
@@ -648,14 +649,19 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
    * @throws UnexpectedAppendOffsetException If the first or last offset in append is less than next offset
    * @return Information about the appended messages including the first and last offset.
    */
+  // 负责将消息追加到日志文件中的核心方法。这个方法被 ReplicaManager 调用，以处理来自生产者的消息写入请求
+  // 向active segment 追加 log,必要的情况下,滚动创建新的 segment
   private def append(records: MemoryRecords, isFromClient: Boolean, assignOffsets: Boolean, leaderEpoch: Int): LogAppendInfo = {
     maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+      //分析和验证将要被写入到 Kafka 分区日志中的消息记录是否满足要求，如CRC校验和、消息大小是否超过最大限制值等
       val appendInfo = analyzeAndValidateRecords(records, isFromClient = isFromClient)
 
       // return if we have no valid messages or if this is a duplicate of the last appended entry
+      //若没有有效消息，直接返回
       if (appendInfo.shallowCount == 0)
         return appendInfo
 
+      //删除这批消息中无效的消息
       // trim any invalid bytes or partial messages before appending it to the on-disk log
       var validRecords = trimInvalidBytes(records, appendInfo)
 
@@ -664,8 +670,10 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
         checkIfMemoryMappedBufferClosed()
         if (assignOffsets) {
           // assign offsets to the message set
+          //计算这个消息集起始 offset，对 offset 的操作是一个原子操作
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
           appendInfo.firstOffset = offset.value
+          //设置的时间以 server 收到的时间戳为准
           val now = time.milliseconds
           val validateAndOffsetAssignResult = try {
             LogValidator.validateMessagesAndAssignOffsets(validRecords,
@@ -693,6 +701,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
 
           // re-validate message sizes if there's a possibility that they have changed (due to re-compression or message
           // format conversion)
+          //更新 metrics 的记录
           if (validateAndOffsetAssignResult.messageSizeMaybeChanged) {
             for (batch <- validRecords.batches.asScala) {
               if (batch.sizeInBytes > config.maxMessageSize) {
@@ -734,6 +743,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
         }
 
         // check messages set size may be exceed config.segmentSize
+        //检查消息集大小是否超过segment.bytes（单个logSegment文件最大大小），若超过则返回异常
         if (validRecords.sizeInBytes > config.segmentSize) {
           throw new RecordBatchTooLargeException("Message batch size is %d bytes which exceeds the maximum configured segment size of %d."
             .format(validRecords.sizeInBytes, config.segmentSize))
@@ -751,6 +761,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
         }
 
         // maybe roll the log if this segment is full
+        //如果当前的 LogSegment 满了，就需要重新新建一个 segment
         val segment = maybeRoll(messagesSize = validRecords.sizeInBytes,
           maxTimestampInMessages = appendInfo.maxTimestamp,
           maxOffsetInMessages = appendInfo.lastOffset)
@@ -760,6 +771,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
           segmentBaseOffset = segment.baseOffset,
           relativePositionInSegment = segment.size)
 
+        //向activeSegment写入数据
         segment.append(firstOffset = appendInfo.firstOffset,
           largestOffset = appendInfo.lastOffset,
           largestTimestamp = appendInfo.maxTimestamp,
@@ -784,6 +796,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
         producerStateManager.updateMapEndOffset(appendInfo.lastOffset + 1)
 
         // increment the log end offset
+        //更新LEO，即 nextOffsetMetadata.messageOffset
         updateLogEndOffset(appendInfo.lastOffset + 1)
 
         // update the first unstable offset (which is used to compute LSO)
@@ -794,6 +807,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
           s"next offset: ${nextOffsetMetadata.messageOffset}, " +
           s"and messages: $validRecords")
 
+        //若自从上一次刷新到现在的未刷盘消息已经满足了flush.messages配置的值，则需要刷新磁盘
         if (unflushedMessages >= config.flushInterval)
           flush()
 
@@ -899,6 +913,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
 
     for (batch <- records.batches.asScala) {
       // we only validate V2 and higher to avoid potential compatibility issues with older clients
+      //是否满足特定于消息格式的要求。
       if (batch.magic >= RecordBatch.MAGIC_VALUE_V2 && isFromClient && batch.baseOffset != 0)
         throw new InvalidRecordException(s"The baseOffset of the record batch should be 0, but it is ${batch.baseOffset}")
 
@@ -918,6 +933,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
       lastOffset = batch.lastOffset
 
       // Check if the message sizes are valid.
+      //检查消息的大小是否超过了配置的 max.message.bytes 参数限制
       val batchSize = batch.sizeInBytes
       if (batchSize > config.maxMessageSize) {
         brokerTopicStats.topicStats(topicPartition.topic).bytesRejectedRate.mark(records.sizeInBytes)
@@ -927,6 +943,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
       }
 
       // check the validity of the message by checking CRC
+      //CRC校验和
       batch.ensureValid()
 
       if (batch.maxTimestamp > maxTimestamp) {
@@ -1582,6 +1599,7 @@ class Log(@volatile var dir: File, //主题分区副本的目录路径。
   /**
    * The active segment that is currently taking appends
    */
+  //segments跳跃表的最后一个元素，任何时刻，只会有一个活动的日志分段
   def activeSegment = segments.lastEntry.getValue
 
   /**

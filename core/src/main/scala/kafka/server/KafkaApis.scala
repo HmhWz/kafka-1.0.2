@@ -95,7 +95,9 @@ class KafkaApis(val requestChannel: RequestChannel,
       trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
       request.header.apiKey match {
+        //处理生产者请求
         case ApiKeys.PRODUCE => handleProduceRequest(request)
+        //处理消费者请求
         case ApiKeys.FETCH => handleFetchRequest(request)
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
@@ -363,11 +365,14 @@ class KafkaApis(val requestChannel: RequestChannel,
   /**
    * Handle a produce request
    */
+  //处理来自生产者的请求
   def handleProduceRequest(request: RequestChannel.Request) {
     val produceRequest = request.body[ProduceRequest]
     val numBytesAppended = request.header.toStruct.sizeOf + request.sizeOfBodyInBytes
 
+    //事务消息
     if (produceRequest.isTransactional) {
+      //判断有没有 Write 权限
       if (!authorize(request.session, Write, new Resource(TransactionalId, produceRequest.transactionalId))) {
         sendErrorResponseMaybeThrottle(request, Errors.TRANSACTIONAL_ID_AUTHORIZATION_FAILED.exception)
         return
@@ -393,6 +398,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     // the callback for sending a produce response
+    //回调函数
     def sendResponseCallback(responseStatus: Map[TopicPartition, PartitionResponse]) {
 
       val mergedResponseStatus = responseStatus ++ unauthorizedTopicResponses ++ nonExistingTopicResponses
@@ -414,6 +420,8 @@ class KafkaApis(val requestChannel: RequestChannel,
           // no operation needed if producer request.required.acks = 0; however, if there is any error in handling
           // the request, since no response is expected by the producer, the server will close socket server so that
           // the producer client will know that some error has happened and will refresh its metadata
+          //若client设置的 request.required.acks=0, 如果 server 在处理的过程出现了错误,那么就会关闭 socket 连接来间接地通知 client
+          // client 会重新刷新 meta,重新建立相应的连接
           if (errorInResponse) {
             val exceptionsSummary = mergedResponseStatus.map { case (topicPartition, status) =>
               topicPartition -> status.error.exceptionName
@@ -423,6 +431,7 @@ class KafkaApis(val requestChannel: RequestChannel,
                 s"from client id ${request.header.clientId} with ack=0\n" +
                 s"Topic and partition to exceptions: $exceptionsSummary"
             )
+            //关闭连接
             closeConnection(request, new ProduceResponse(mergedResponseStatus.asJava).errorCounts)
           } else {
             sendNoOpResponseExemptThrottle(request)
@@ -455,6 +464,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       val internalTopicsAllowed = request.header.clientId == AdminUtils.AdminClientId
 
       // call the replica manager to append messages to the replicas
+      //调用replicaManager.appendRecords()向副本添加日志
       replicaManager.appendRecords(
         timeout = produceRequest.timeout.toLong,
         requiredAcks = produceRequest.acks,

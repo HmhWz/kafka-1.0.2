@@ -151,6 +151,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * @return the number of bytes written to the underlying file
      */
     public int append(MemoryRecords records) throws IOException {
+        //通过java NIO的channel.write写入消息对应的ByteBuffer
         int written = records.writeFullyTo(channel);
         size.getAndAdd(written);
         return written;

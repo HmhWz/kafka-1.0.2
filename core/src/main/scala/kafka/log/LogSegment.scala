@@ -103,6 +103,7 @@ class LogSegment(val log: FileRecords,
    * @param records The log entries to append.
    * @return the physical position in the file of the appended records
    */
+  //在指定的 offset 处追加指定的 messages, 需要的情况下追加相应的索引
   @nonthreadsafe
   def append(firstOffset: Long,
              largestOffset: Long,
@@ -117,6 +118,7 @@ class LogSegment(val log: FileRecords,
         rollingBasedTimestamp = Some(largestTimestamp)
       // append the messages
       require(canConvertToRelativeOffset(largestOffset), "largest offset in message set can not be safely converted to relative offset.")
+      //追加到数据文件中
       val appendedBytes = log.append(records)
       trace(s"Appended $appendedBytes to ${log.file()} at offset $firstOffset")
       // Update the in memory max timestamp and corresponding offset.
@@ -125,6 +127,7 @@ class LogSegment(val log: FileRecords,
         offsetOfMaxTimestamp = shallowOffsetOfMaxTimestamp
       }
       // append an entry to the index (if needed)
+      //判断是否需要追加索引（数据每次都会添加到数据文件中,但不是每次都会添加索引的,间隔 indexIntervalBytes 大小才会写入一个索引文件）
       if(bytesSinceLastIndexEntry > indexIntervalBytes) {
         index.append(firstOffset, physicalPosition)
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestamp)

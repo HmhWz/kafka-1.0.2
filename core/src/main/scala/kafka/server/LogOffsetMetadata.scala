@@ -38,6 +38,7 @@ object LogOffsetMetadata {
  *  2. the base message offset of the located segment
  *  3. the physical position on the located segment
  */
+//第一个参数：下一条消息的偏移量；第二个参数：日志分段的基准偏移量；第三个参数：日志分段大小
 case class LogOffsetMetadata(messageOffset: Long,
                              segmentBaseOffset: Long = LogOffsetMetadata.UnknownSegBaseOffset,
                              relativePositionInSegment: Int = LogOffsetMetadata.UnknownFilePosition) {

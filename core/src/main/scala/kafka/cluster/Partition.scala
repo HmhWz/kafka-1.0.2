@@ -516,26 +516,36 @@ class Partition(val topic: String,
     }
   }
 
+  //Partition 类的 appendRecordsToLeader() 方法是处理生产者发送的消息并将其追加到 Leader 副本日志中的关键方法。
+  // 这个方法由 Kafka 的 ReplicaManager 调用，用于确保消息被正确地写入到 Leader 副本的日志中，并且 Follower 副本能够从 Leader 中同步数据
   def appendRecordsToLeader(records: MemoryRecords, isFromClient: Boolean, requiredAcks: Int = 0): LogAppendInfo = {
     val (info, leaderHWIncremented) = inReadLock(leaderIsrUpdateLock) {
       leaderReplicaIfLocal match {
         case Some(leaderReplica) =>
+          //获取对应的 Log 对象, 一个Log对象对应一个主题分区副本的目录路径。
           val log = leaderReplica.log.get
+          //min.insync.replicas配置值，即isr副本数
           val minIsr = log.config.minInSyncReplicas
           val inSyncSize = inSyncReplicas.size
 
           // Avoid writing to leader if there are not enough insync replicas to make it safe
+          //如果当前分区的isr副本数小于预期值，且producer client设置的acks=-1，则抛出异常
           if (inSyncSize < minIsr && requiredAcks == -1) {
             throw new NotEnoughReplicasException("Number of insync replicas for partition %s is [%d], below required minimum [%d]"
               .format(topicPartition, inSyncSize, minIsr))
           }
-
+          //向分区leader副本对应的 log对象追加数据，
+          //（一个Log对象对应机器上的一个topic-partition目录，里面有多个logSegment文件，以及包括对应的 offset 索引和时间戳索引文件）
           val info = log.appendAsLeader(records, leaderEpoch = this.leaderEpoch, isFromClient)
           // probably unblock some follower fetch requests since log end offset has been updated
           replicaManager.tryCompleteDelayedFetch(TopicPartitionOperationKey(this.topic, this.partitionId))
           // we may need to increment high watermark since ISR could be down to 1
+          //可能需要增加高水位（HW）的值。
+          //高水位标记了消费者可以看到的消息的最大偏移量。Leader 副本使用 HW 来确定哪些消息可以被消费者读取。Follower 副本在发送 Fetch 请求时，
+          // 也会提供自己的 HW 信息，以便 Leader 知道 Follower 的同步状态。
           (info, maybeIncrementLeaderHW(leaderReplica))
 
+        //此分区对应的leader副本不在本broker，返回异常
         case None =>
           throw new NotLeaderForPartitionException("Leader not local for partition %s on broker %d"
             .format(topicPartition, localBrokerId))
