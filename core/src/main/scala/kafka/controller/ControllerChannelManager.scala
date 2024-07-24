@@ -46,15 +46,21 @@ object ControllerChannelManager {
   val QueueSizeMetricName = "QueueSize"
 }
 
-//在 Kafka 中，ControllerChannelManager 是一个关键组件，负责管理控制器与其它 Kafka 代理（Broker）之间的通信。控制器（Controller）是 Kafka 集群中的一个特殊角色，负责管理集群的元数据和协调集群的操作，如分区分配、副本同步等。
+//在 Kafka 中，ControllerChannelManager 是一个关键组件，负责管理控制器与其它 Kafka 代理（Broker）之间的通信。
+// 控制器（Controller）是 Kafka 集群中的一个特殊角色，负责管理集群的元数据和协调集群的操作，如分区分配、副本同步等。
 //
 //ControllerChannelManager 的主要功能包括：
-//
 //管理通信通道：维护控制器与各个 Broker 之间的网络连接和通信通道。
 //发送控制命令：向 Broker 发送控制命令，如分区重分配、副本同步等。
 //接收响应：接收 Broker 发送的响应和状态更新。
 //处理失败和重试：处理与 Broker 通信过程中可能出现的失败，并进行重试。
 //监控和统计：监控通信状态和性能，收集统计信息。
+
+//KafkaController 通过发送特定的请求来与 broker 通信。这些请求包括但不限于：
+//LeaderAndIsrRequest：用于更新分区的 leader 和 ISR（In-Sync Replicas）。
+//StopReplicaRequest：用于停止某个分区的副本。
+//UpdateMetadataRequest：用于更新分区的元数据信息。
+//ReassignPartitionsRequest：用于重新分配分区的副本。
 
 //ControllerChannelManager 在初始化时，会为集群中的每个节点初始化一个 ControllerBrokerStateInfo 对象，该对象包含四个部分：
 //
@@ -79,6 +85,7 @@ class ControllerChannelManager(controllerContext: ControllerContext, config: Kaf
     }
   )
 
+  //会为每个broker创建对应的RequestSendThread线程
   controllerContext.liveBrokers.foreach(addNewBroker)
 
   def startup() = {
@@ -304,11 +311,20 @@ class RequestSendThread(val controllerId: Int,
 class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogger: StateChangeLogger) extends  Logging {
   val controllerContext = controller.controllerContext
   val controllerId: Int = controller.config.brokerId
+  //记录每个 broker 与要发送的 LeaderAndIsr 请求集合的 map；
   val leaderAndIsrRequestMap = mutable.Map.empty[Int, mutable.Map[TopicPartition, LeaderAndIsrRequest.PartitionState]]
+  //记录每个 broker 与要发送的 StopReplica 集合的 map；
   val stopReplicaRequestMap = mutable.Map.empty[Int, Seq[StopReplicaRequestInfo]]
+  //记录要发送的 update-metadata 请求的 broker 集合；
   val updateMetadataRequestBrokerSet = mutable.Set.empty[Int]
+  //记录 update-metadata 请求要更新的 Topic Partition 集合。
   val updateMetadataRequestPartitionInfoMap = mutable.Map.empty[TopicPartition, UpdateMetadataRequest.PartitionState]
 
+  //创建新的请求前, 需要确保前一批请求全部发送完毕，否则抛出异常
+  //这个方法的主要作用是检查上一波的 LeaderAndIsr、UpdateMetadata、StopReplica 请求是否已经发送，
+  // 正常情况下，Controller 在调用 sendRequestsToBrokers() 方法之后，这些集合中的请求都会被发送，发送之后，会将相应的请求集合清空，
+  // 当然在异常情况可能会导致部分集合没有被清空，导致无法 newBatch()，这种情况下，通常策略是重启 controller，因为现在 Controller 的设计还是有些复杂，
+  // 在某些情况下还是可能会导致异常发生，并且有些异常还是无法恢复的。
   def newBatch() {
     // raise error if the previous batch is not empty
     if (leaderAndIsrRequestMap.nonEmpty)
@@ -330,11 +346,16 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
     updateMetadataRequestPartitionInfoMap.clear()
   }
 
+
+  //向对应的 Broker 添加 LeaderAndIsr 请求，请求会被添加到 leaderAndIsrRequestMap 集合中；
+  //并通过 addUpdateMetadataRequestForBrokers() 方法向所有的 Broker 添加这个 Topic-Partition 的 UpdateMatedata 请求，
+  //leader 或 isr 变动时，会向所有 broker 同步这个 Partition 的 metadata 信息，这样可以保证每台 Broker 上都有最新的 metadata 信息。
   def addLeaderAndIsrRequestForBrokers(brokerIds: Seq[Int], topic: String, partition: Int,
                                        leaderIsrAndControllerEpoch: LeaderIsrAndControllerEpoch,
                                        replicas: Seq[Int], isNew: Boolean = false) {
     val topicPartition = new TopicPartition(topic, partition)
 
+    //将请求添加到对应的 broker 上
     brokerIds.filter(_ >= 0).foreach { brokerId =>
       val result = leaderAndIsrRequestMap.getOrElseUpdate(brokerId, mutable.Map.empty)
       val alreadyNew = result.get(topicPartition).exists(_.isNew)
@@ -347,10 +368,12 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
         isNew || alreadyNew))
     }
 
+    //在更新 LeaderAndIsr 信息时,主题的 metadata 相当于也进行了更新,需要发送这个 topic 的 metadata 给所有存活的 broker
     addUpdateMetadataRequestForBrokers(controllerContext.liveOrShuttingDownBrokerIds.toSeq,
                                        Set(TopicAndPartition(topic, partition)))
   }
 
+  //向给定的 Broker 发送某个 Topic Partition 的 StopReplica 请求；
   def addStopReplicaRequestForBrokers(brokerIds: Seq[Int], topic: String, partition: Int, deletePartition: Boolean,
                                       callback: (AbstractResponse, Int) => Unit = null) {
     brokerIds.filter(b => b >= 0).foreach { brokerId =>
@@ -365,10 +388,18 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
     }
   }
 
+  //向给定的 Broker 发送某一批 Partitions 的 UpdateMetadata 请求。
+  //首先过滤出要发送的 Partition 列表，如果没有指定要发送 partitions 列表，那么默认就是发送全局的 metadata 信息；
+  //接着将已经标记为删除的 Partition 从上面的列表中移除；
+  //将要发送的 Broker 列表添加到 updateMetadataRequestBrokerSet 集合中；
+  //将前面过滤的 Partition 列表对应的 metadata 信息添加到对应的 updateMetadataRequestPartitionInfoMap 集合中;
+  //将当前设置为删除的所有 Partition 的 metadata 信息也添加到 updateMetadataRequestPartitionInfoMap 集合中，添加前会把其 leader 设置为-2，
+  // 这样 Broker 收到这个 Partition 的 metadata 信息之后就会知道这个 Partition 是设置删除标志。
   /** Send UpdateMetadataRequest to the given brokers for the given partitions and partitions that are being deleted */
   def addUpdateMetadataRequestForBrokers(brokerIds: Seq[Int],
                                          partitions: collection.Set[TopicAndPartition] = Set.empty[TopicAndPartition]) {
 
+    //将 Topic-Partition 添加到对应的 map 中
     def updateMetadataRequestPartitionInfo(partition: TopicAndPartition, beingDeleted: Boolean) {
       val leaderIsrAndControllerEpochOpt = controllerContext.partitionLeadershipInfo.get(partition)
       leaderIsrAndControllerEpochOpt match {
@@ -396,7 +427,9 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
       }
     }
 
+    //过滤出要发送的 partition
     val filteredPartitions = {
+      //Partitions 为空时，就过滤出所有的 topic
       val givenPartitions = if (partitions.isEmpty)
         controllerContext.partitionLeadershipInfo.keySet
       else
@@ -407,11 +440,20 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
         givenPartitions -- controller.topicDeletionManager.partitionsToBeDeleted
     }
 
+    //将 broker 列表更新到要发送的集合中
     updateMetadataRequestBrokerSet ++= brokerIds.filter(_ >= 0)
+    //对于要更新 metadata 的 Partition,设置 beingDeleted 为 False
     filteredPartitions.foreach(partition => updateMetadataRequestPartitionInfo(partition, beingDeleted = false))
+    //要删除的 Partition 设置 BeingDeleted 为 True
     controller.topicDeletionManager.partitionsToBeDeleted.foreach(partition => updateMetadataRequestPartitionInfo(partition, beingDeleted = true))
   }
 
+  //发送请求给 broker（只是将对应处理后放入到对应的 queue 中）
+  //此方法将三个集合中的请求发送对应 Broker 的请求队列中，这里简单作一个总结：
+  //从 leaderAndIsrRequestMap 集合中构造相应的 LeaderAndIsr 请求，通过 Controller 的 sendRequest() 方法将请求添加到 Broker 对应的 MessageQueue 中，最后清空 leaderAndIsrRequestMap 集合；
+  //从 updateMetadataRequestPartitionInfoMap 集合中构造相应的 UpdateMetadata 请求，，通过 Controller 的 sendRequest() 方法将请求添加到 Broker 对应的 MessageQueue 中，最后清空 updateMetadataRequestBrokerSet 和 updateMetadataRequestPartitionInfoMap 集合；
+  //从 stopReplicaRequestMap 集合中构造相应的 StopReplica 请求，在构造时会根据是否设置删除标志将要涉及的 Partition 分成两类，构造对应的请求，对于要删除数据的 StopReplica 会设置相应的回调函数，然后通过 Controller 的 sendRequest() 方法将请求添加到 Broker 对应的 MessageQueue 中，最后清空 stopReplicaRequestMap 集合。
+  //走到这一步，Controller 要发送的请求算是都添加到对应 Broker 的 MessageQueue 中，后台的 RequestSendThread 线程会从这个请求队列中遍历相应的请求，发送给对应的 Broker。
   def sendRequestsToBrokers(controllerEpoch: Int) {
     try {
       val stateChangeLog = stateChangeLogger.withControllerEpoch(controllerEpoch)
@@ -420,6 +462,7 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
         if (controller.config.interBrokerProtocolVersion >= KAFKA_1_0_IV0) 1
         else 0
 
+      //LeaderAndIsr 请求
       leaderAndIsrRequestMap.foreach { case (broker, leaderAndIsrPartitionStates) =>
         leaderAndIsrPartitionStates.foreach { case (topicPartition, state) =>
           val typeOfRequest =
@@ -427,15 +470,18 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
             else "become-follower"
           stateChangeLog.trace(s"Sending $typeOfRequest LeaderAndIsr request $state to broker $broker for partition $topicPartition")
         }
+        //leader id 集合
         val leaderIds = leaderAndIsrPartitionStates.map(_._2.basePartitionState.leader).toSet
         val leaders = controllerContext.liveOrShuttingDownBrokers.filter(b => leaderIds.contains(b.id)).map {
           _.getNode(controller.config.interBrokerListenerName)
         }
+        //构造 LeaderAndIsr 请求,并添加到对应的 queue 中
         val leaderAndIsrRequestBuilder = new LeaderAndIsrRequest.Builder(leaderAndIsrRequestVersion, controllerId,
           controllerEpoch, leaderAndIsrPartitionStates.asJava, leaders.asJava)
         controller.sendRequest(broker, ApiKeys.LEADER_AND_ISR, leaderAndIsrRequestBuilder,
           (r: AbstractResponse) => controller.eventManager.put(controller.LeaderAndIsrResponseReceived(r, broker)))
       }
+      //清空 leaderAndIsr 集合
       leaderAndIsrRequestMap.clear()
 
       updateMetadataRequestPartitionInfoMap.foreach { case (tp, partitionState) =>
@@ -451,6 +497,7 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
         else if (controller.config.interBrokerProtocolVersion >= KAFKA_0_9_0) 1
         else 0
 
+      //构造 update-metadata 请求
       val updateMetadataRequest = {
         val liveBrokers = if (updateMetadataRequestVersion == 0) {
           // Version 0 of UpdateMetadataRequest only supports PLAINTEXT.
@@ -473,12 +520,14 @@ class ControllerBrokerRequestBatch(controller: KafkaController, stateChangeLogge
           liveBrokers.asJava)
       }
 
+      // 将请求添加到对应的 queue
       updateMetadataRequestBrokerSet.foreach { broker =>
         controller.sendRequest(broker, ApiKeys.UPDATE_METADATA, updateMetadataRequest, null)
       }
       updateMetadataRequestBrokerSet.clear()
       updateMetadataRequestPartitionInfoMap.clear()
 
+      // StopReplica 请求的处理
       stopReplicaRequestMap.foreach { case (broker, replicaInfoList) =>
         val stopReplicaWithDelete = replicaInfoList.filter(_.deletePartition).map(_.replica).toSet
         val stopReplicaWithoutDelete = replicaInfoList.filterNot(_.deletePartition).map(_.replica).toSet
